@@ -9,14 +9,23 @@ from QuantumClassicalDynamics.wavefunc_monte_carlo1D import *
 from multiprocessing import Pool
 
 
-def propagate_traj(params):
+def propagate_traj(args):
     """
     A function that propagates a single quantum trajectory
     :param params: dictionary of parameters to initialize the Monte Carlo propagator
+    :param seed: the seed for random number generator
     :return: numpy.array contanning the final wavefunction
     """
+    # extract the propagator parameters and seed
+    params, seed = args
+
     # Since there are many trajectories are run in parallel use only a single thread
     ne.set_num_threads(1)
+
+    # Set the seed for random number generation to avoid the artifact described in
+    #   https://stackoverflow.com/questions/24345637/why-doesnt-numpy-random-and-multiprocessing-play-nice
+    # It is recommended that seeds be generate via the function get_seeds (see below)
+    np.random.seed(seed)
 
     # initialize the propagator
     qsys = WavefuncMonteCarloPoission(**params)
@@ -24,6 +33,33 @@ def propagate_traj(params):
 
     # propagate
     return qsys.propagate(qsys.ntsteps)
+
+
+def get_seeds(size):
+    """
+    Generate unique random seeds for subsequently seeding them into random number generators in multiprocessing simulations
+
+    This utility is to avoid the following artifact:
+        https://stackoverflow.com/questions/24345637/why-doesnt-numpy-random-and-multiprocessing-play-nice
+    :param size: number of samples to generate
+    :return: numpy.array of np.uint32
+    """
+    # Note that np.random.seed accepts 32 bit unsigned integers
+
+    # get the maximum value of np.uint32 can take
+    max_val = np.iinfo(np.uint32).max
+
+    # A set of unique and random np.uint32
+    seeds = set()
+
+    # generate random numbers until we have sufficiently many nonrepeating numbers
+    while len(seeds) < size:
+        seeds.update(
+            np.random.randint(max_val, size=size, dtype=np.uint32)
+        )
+
+    # make sure we do not return more numbers that we are asked for
+    return np.fromiter(seeds, np.uint32, size)
 
 
 def get_rho_monte_carlo(params):
@@ -38,16 +74,15 @@ def get_rho_monte_carlo(params):
     monte_carlo_rho = np.zeros((X_gridDIM, X_gridDIM), dtype=np.complex)
     rho_traj = np.zeros_like(monte_carlo_rho) # monte_carlo_rho is average of rho_traj
 
-    # launch 1000 trajectories
-    from itertools import repeat
+    # the iterator to launch (12 * chunksize) trajectories
     chunksize = 10
-    trajs = repeat(params, 12 * chunksize)
+    iter_trajs = ((params, seed) for seed in get_seeds(12 * chunksize))
 
     # run each Monte Carlo trajectories on multiple cores
     with Pool() as pool:
         # index counting the trajectory needed to calculate the mean iteratively
         t = 0
-        for psi in pool.imap_unordered(propagate_traj,  trajs, chunksize=chunksize):
+        for psi in pool.imap_unordered(propagate_traj, iter_trajs, chunksize=chunksize):
 
             # form the density matrix out of the wavefunctions
             np.outer(psi.conj(), psi, out=rho_traj)
@@ -68,6 +103,8 @@ if __name__ =='__main__':
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
 
+    np.random.seed(1341)
+
     ##############################################################################################
     #
     # Setup parameters of the tunneling system
@@ -78,7 +115,7 @@ if __name__ =='__main__':
         t=0.,
         dt=0.002,
         X_gridDIM=1024,
-        X_amplitude=24.,
+        X_amplitude=30.,
 
         # Kinetic energy
         K="0.5 * P ** 2",
@@ -91,7 +128,7 @@ if __name__ =='__main__':
         diff_V="-X * U0 * exp(-0.5 * X ** 2)",
 
         # use absorbing boundary
-        abs_boundary="sin(0.5 * pi * (X + X_amplitude) / X_amplitude) ** (0.02 * dt)",
+        abs_boundary="sin(0.5 * pi * (X + X_amplitude) / X_amplitude) ** (0.005 * dt)",
         pi=np.pi,
 
         # number of steps to propagate
@@ -109,12 +146,14 @@ if __name__ =='__main__':
     #
     # Setup spontaneous emission propagator
     #
+    #   see Eq. (13) of https://arxiv.org/abs/1706.00341
+    #
     ##############################################################################################
 
-    def apply_spont_emission_pluse(self):
+    def apply_spont_emission_plus(self):
         """
         Apply
-            A = exp(-1j * p0 * X) * C * exp(k * P)
+            A^+  = exp(-1j * p0 * X) * C * exp(q * P)
         onto the wavefunction
         :param self:
         :return: None
@@ -131,7 +170,9 @@ if __name__ =='__main__':
 
     def apply_spont_emission_minus(self):
         """
-        The complex conjugate version of the previous function
+         Apply
+            A^-  = exp(1j * p0 * X) * C * exp(-q * P)
+        onto the wavefunction
         :param self:
         :return: None
         """
@@ -139,7 +180,7 @@ if __name__ =='__main__':
         ne.evaluate("(-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
         self.wavefunction = fftpack.fft(self.wavefunction, overwrite_x=True)
 
-        ne.evaluate("exp(q * P) * wavefunction", local_dict=vars(self), out=self.wavefunction)
+        ne.evaluate("exp(-q * P) * wavefunction", local_dict=vars(self), out=self.wavefunction)
 
         # Go back to the coordinate representation
         self.wavefunction = fftpack.ifft(self.wavefunction, overwrite_x=True)
@@ -147,12 +188,12 @@ if __name__ =='__main__':
 
     spontaneous_emission_params = params.copy()
     spontaneous_emission_params.update(
-        C=4.,
-        p0=0.01,
+        C=10.,
+        p0=0.1,
         q=0.01,
 
-        BdaggerB_P=("(C * exp(q * P)) ** 2", "(C * exp(q * P)) ** 2"),
-        apply_B=(apply_spont_emission_pluse, apply_spont_emission_minus)
+        BdaggerB_P=("(C * exp(q * P)) ** 2", "(C * exp(-q * P)) ** 2"),
+        apply_B=(apply_spont_emission_plus, apply_spont_emission_minus)
     )
 
     ##############################################################################################
@@ -165,13 +206,7 @@ if __name__ =='__main__':
 
     spontaneous_emission_rho = get_rho_monte_carlo(spontaneous_emission_params)
 
-    ##############################################################################################
-    #
-    #   Plot
-    #
-    ##############################################################################################
-
-    plt.title("")
+    plt.title("Coordinate probability density")
     plt.semilogy(
         coherent_tunneling.X,
         spontaneous_emission_rho.diagonal(),
@@ -183,44 +218,96 @@ if __name__ =='__main__':
         label="Coherent tunneling"
     )
     plt.xlabel("$x$ (a.u.)")
+    plt.ylabel("Coordinate probability density")
+    plt.ylim((1e-7, 1.))
+    plt.legend()
+    plt.show()
+
+
+    ##############################################################################################
+    #
+    #   Compare individual coherent and incoherent evolutions
+    #
+    ##############################################################################################
+
+    """
+    plt.title("Plot the potential barrier")
+    plt.plot(
+        propagator.X,
+        ne.evaluate(propagator.V, local_dict=vars(propagator)),
+        '-*'
+    )
+    plt.show()
+    """
+
+    """
+    def analyze_single_propagation(propagator):
+        indx = np.where(propagator.X > 2)
+
+        densities = []
+        tunnelling_probability = []
+
+        # set the initial condition
+        propagator.set_wavefunction(propagator.initial_condition)
+
+        for _ in range(propagator.ntsteps):
+            density = np.abs(propagator.propagate()) ** 2
+
+            densities.append(density)
+            tunnelling_probability.append(
+                np.sum(density[indx]) * propagator.dX
+            )
+        return densities, tunnelling_probability
+
+    coherent_tunneling = SplitOpSchrodinger1D(**params)
+    coherent_density, coherent_tunnelling = analyze_single_propagation(coherent_tunneling)
+
+    spontaneous_emission_density, spontaneous_emission_tunnelling = analyze_single_propagation(
+        WavefuncMonteCarloPoission(**spontaneous_emission_params)
+    )
+
+    plt.subplot(121)
+    plt.title("Coherenet evolution: Probability density")
+    img_params = dict(
+        origin = 'lower',
+        norm = LogNorm(1e-12, 1.),
+        #cmap = 'jet',
+    )
+    plt.imshow(coherent_density, **img_params)
+
+    plt.subplot(122)
+    plt.title("Spontaneous evolution: Probability density")
+    plt.imshow(spontaneous_emission_density, **img_params)
+
+    plt.show()
+
+    plt.title("Final state")
+    plt.semilogy(
+        coherent_tunneling.X,
+        spontaneous_emission_density[-1],
+        label="Spontaneous emission"
+    )
+    plt.semilogy(
+        coherent_tunneling.X,
+        coherent_density[-1],
+        label="Coherent tunneling"
+    )
+    plt.xlabel("$x$ (a.u.)")
     plt.ylabel("Probability")
     plt.ylim((1e-4, 1.))
     plt.legend()
     plt.show()
 
-
-    """
-    plt.title("Plot the potential barrier")
-    plt.plot(
-        coherent_tunneling.X,
-        ne.evaluate(coherent_tunneling.V, local_dict=vars(coherent_tunneling)),
-        '-*'
-    )
-    plt.show()
-    
-
-    plt.title("Probability density")
-    plt.imshow(
-        [np.abs(coherent_tunneling.propagate()) ** 2 for _ in range(coherent_tunneling.ntsteps)],
-        origin='lower',
-        norm=LogNorm(1e-12, 1.),
-        cmap='jet',
-    )
-    plt.show()
-    
-
-    indx = np.where(coherent_tunneling.X > 2)
-    tunnelling_probability = [
-        np.sum(np.abs(coherent_tunneling.propagate()[indx]) ** 2) * coherent_tunneling.dX
-        for _ in range(coherent_tunneling.ntsteps)
-    ]
-    plt.plot(tunnelling_probability)
+    plt.title("Tunneling probability")
+    plt.plot(coherent_tunnelling, label="Coherent tunneling")
+    plt.plot(spontaneous_emission_tunnelling, label="Spontaneous emission")
+    plt.legend()
     plt.show()
     """
 
-    """
     ##################################################################################################
 
+    """
     plt.subplot(131)
     plt.title("Verify the first Ehrenfest theorem")
 
