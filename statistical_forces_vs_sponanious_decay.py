@@ -75,7 +75,7 @@ def get_rho_monte_carlo(params):
     rho_traj = np.zeros_like(monte_carlo_rho) # monte_carlo_rho is average of rho_traj
 
     # the iterator to launch (12 * chunksize) trajectories
-    chunksize = 10
+    chunksize = 1000
     iter_trajs = ((params, seed) for seed in get_seeds(12 * chunksize))
 
     # run each Monte Carlo trajectories on multiple cores
@@ -102,8 +102,6 @@ if __name__ =='__main__':
 
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
-
-    np.random.seed(1341)
 
     ##############################################################################################
     #
@@ -188,12 +186,55 @@ if __name__ =='__main__':
 
     spontaneous_emission_params = params.copy()
     spontaneous_emission_params.update(
-        C=10.,
+        C=20.,
         p0=0.1,
-        q=0.01,
+        q=0.008,
 
         BdaggerB_P=("(C * exp(q * P)) ** 2", "(C * exp(-q * P)) ** 2"),
         apply_B=(apply_spont_emission_plus, apply_spont_emission_minus)
+    )
+
+    ##############################################################################################
+    #
+    # Setup the statistical force that compensates the barrier
+    #
+    #   see Eq. (6a) of https://arxiv.org/abs/1611.02736
+    #
+    ##############################################################################################
+
+    stat_force_params = params.copy()
+
+    C = 25.
+    p0 = 0.001
+
+    # Magnetic field [Eq. (9)]
+    diff_V = ne.evaluate(stat_force_params["diff_V"], local_dict=vars(coherent_tunneling))
+
+    B = 1. / (16 * C ** 4) * diff_V * np.sqrt(16 * p0 ** 2 * C ** 4 - diff_V ** 2)
+
+    ((16 * p0 ** 2 * C ** 4 - diff_V ** 2).min())
+
+    #assert any(np.isnan(B)), "adjust p0 and C"
+
+    def apply_A_plus(self):
+        self.wavefunction *= self.A_plus
+
+    def apply_A_minus(self):
+        self.wavefunction *= self.A_minus
+
+    stat_force_params.update(
+        A_plus=C * np.exp(
+            2j * np.cumsum(np.sqrt(p0 ** 2 + 2 * B)) * coherent_tunneling.dX
+        ),
+
+        A_minus=C * np.exp(
+            -2j * np.cumsum(np.sqrt(p0 ** 2 - 2 * B)) * coherent_tunneling.dX
+        ),
+
+        C = C,
+
+        AdaggerA_X=("C ** 2", "C ** 2"),
+        apply_A=(apply_A_plus, apply_A_minus),
     )
 
     ##############################################################################################
@@ -206,11 +247,61 @@ if __name__ =='__main__':
 
     spontaneous_emission_rho = get_rho_monte_carlo(spontaneous_emission_params)
 
+    stat_force_rho = get_rho_monte_carlo(stat_force_params)
+
+    def get_purity(rho, dX=coherent_tunneling.dX):
+        """
+        Calculate purity
+        :param rho: numpy.array saving the density matrix
+        :param dX: (float) coordinate step size
+        :return: float
+        """
+        return np.sum(np.abs(rho) ** 2) * dX ** 2
+
+    print(
+        "Purity of spontaneous emission: {:.3f}".format(
+            get_purity(spontaneous_emission_rho)
+        )
+    )
+    print(
+        "Purity of environmentally assisted tunneling: {:.3f}".format(
+            get_purity(stat_force_rho)
+        )
+    )
+
+    ##############################################################################################
+    #
+    #   Save the propagation results
+    #
+    ##############################################################################################
+
+    import pickle
+    with open("RESULTS.pickle", 'bw') as f:
+        pickle.dump(
+            {
+                "coherent_tunneling" : coherent_tunneling,
+                "spontaneous_emission_rho" : spontaneous_emission_rho,
+                "stat_force_rho" : stat_force_rho,
+            },
+            f
+        )
+
+    ##############################################################################################
+    #
+    #   Plot: Compare the final states
+    #
+    ##############################################################################################
+
     plt.title("Coordinate probability density")
     plt.semilogy(
         coherent_tunneling.X,
         spontaneous_emission_rho.diagonal(),
         label="Spontaneous emission"
+    )
+    plt.semilogy(
+        coherent_tunneling.X,
+        stat_force_rho.diagonal(),
+        label="environmentally assisted tunneling"
     )
     plt.semilogy(
         coherent_tunneling.X,
@@ -222,7 +313,6 @@ if __name__ =='__main__':
     plt.ylim((1e-7, 1.))
     plt.legend()
     plt.show()
-
 
     ##############################################################################################
     #
