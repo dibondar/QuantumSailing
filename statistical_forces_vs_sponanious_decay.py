@@ -152,7 +152,7 @@ if __name__ =='__main__':
     def apply_spont_emission_plus(self):
         """
         Apply
-            A^+  = exp(-1j * p0 * X) * C * exp(q * P)
+            S^+ = exp(-1j * kappa * X) * f(P)
         onto the wavefunction
         :param self:
         :return: None
@@ -170,7 +170,7 @@ if __name__ =='__main__':
     def apply_spont_emission_minus(self):
         """
          Apply
-            A^-  = exp(1j * p0 * X) * C * exp(-q * P)
+            S^- = exp(+1j * kappa * X) * f(-P)
         onto the wavefunction
         :param self:
         :return: None
