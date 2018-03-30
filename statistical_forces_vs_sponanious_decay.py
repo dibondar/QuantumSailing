@@ -75,7 +75,7 @@ def get_rho_monte_carlo(params):
     rho_traj = np.zeros_like(monte_carlo_rho) # monte_carlo_rho is average of rho_traj
 
     # the iterator to launch (12 * chunksize) trajectories
-    chunksize = 1000
+    chunksize = 10000
     iter_trajs = ((params, seed) for seed in get_seeds(12 * chunksize))
 
     # run each Monte Carlo trajectories on multiple cores
@@ -111,29 +111,30 @@ if __name__ =='__main__':
 
     params = dict(
         t=0.,
-        dt=0.002,
-        X_gridDIM=1024,
-        X_amplitude=30.,
+        dt=0.5,
+        X_gridDIM=512,
+        X_amplitude=20.,
 
         # Kinetic energy
-        K="0.5 * P ** 2",
-        diff_K="P",
+        m=1837,
+        K="0.5 * P ** 2 / m",
+        diff_K="P / m",
 
 
         # Potential energy
-        U0=4.,
-        V="U0 * exp(-0.5 * X ** 2)",
-        diff_V="-X * U0 * exp(-0.5 * X ** 2)",
+        K0=0.0068,
+        V="2. * K0 * exp(-0.5 * X ** 2)",
+        diff_V="-X * 2. * K0 * exp(-0.5 * X ** 2)",
 
         # use absorbing boundary
-        abs_boundary="sin(0.5 * pi * (X + X_amplitude) / X_amplitude) ** (0.005 * dt)",
-        pi=np.pi,
+        # abs_boundary="sin(0.5 * pi * (X + X_amplitude) / X_amplitude) ** (0.0002 * dt / m)",
+        # pi=np.pi,
 
         # number of steps to propagate
-        ntsteps=2800,
+        ntsteps=7000,
 
         # initial wave function
-        initial_condition="exp(-1. * (X + 4.5) ** 2 + 1j * X)",
+        initial_condition="exp(-1. * (X + 4.5) ** 2 + sqrt(2. * m * K0) * 1j * X)",
     )
 
     # initialize the propagator for coherent tunneling
@@ -160,11 +161,11 @@ if __name__ =='__main__':
         ne.evaluate("(-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
         self.wavefunction = fftpack.fft(self.wavefunction, overwrite_x=True)
 
-        ne.evaluate("exp(q * P) * wavefunction", local_dict=vars(self), out=self.wavefunction)
+        ne.evaluate("c1 / sqrt(c2 ** 2 + (P - c3) ** 2) * wavefunction", local_dict=vars(self), out=self.wavefunction)
 
         # Go back to the coordinate representation
         self.wavefunction = fftpack.ifft(self.wavefunction, overwrite_x=True)
-        ne.evaluate("exp(-1j * p0 * X) * (-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
+        ne.evaluate("exp(-1j * kappa * X) * (-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
 
     def apply_spont_emission_minus(self):
         """
@@ -178,19 +179,20 @@ if __name__ =='__main__':
         ne.evaluate("(-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
         self.wavefunction = fftpack.fft(self.wavefunction, overwrite_x=True)
 
-        ne.evaluate("exp(-q * P) * wavefunction", local_dict=vars(self), out=self.wavefunction)
+        ne.evaluate("c1 / sqrt(c2 ** 2 + (P + c3) ** 2) * wavefunction", local_dict=vars(self), out=self.wavefunction)
 
         # Go back to the coordinate representation
         self.wavefunction = fftpack.ifft(self.wavefunction, overwrite_x=True)
-        ne.evaluate("exp(1j * p0 * X) * (-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
+        ne.evaluate("exp(1j * kappa * X) * (-1) ** k * wavefunction", local_dict=vars(self), out=self.wavefunction)
 
     spontaneous_emission_params = params.copy()
     spontaneous_emission_params.update(
-        C=20.,
-        p0=0.1,
-        q=0.008,
+        c1=0.12,
+        c2=1.,
+        c3=0.1,
+        kappa=1e-3,
 
-        BdaggerB_P=("(C * exp(q * P)) ** 2", "(C * exp(-q * P)) ** 2"),
+        BdaggerB_P=("c1 ** 2 / (c2 ** 2 + (P - c3) ** 2)", "c1 ** 2 / (c2 ** 2 + (P + c3) ** 2)"),
         apply_B=(apply_spont_emission_plus, apply_spont_emission_minus)
     )
 
@@ -204,17 +206,15 @@ if __name__ =='__main__':
 
     stat_force_params = params.copy()
 
-    C = 25.
-    p0 = 0.001
+    C = 1.
+    p0 = 3e-3
 
     # Magnetic field [Eq. (9)]
     diff_V = ne.evaluate(stat_force_params["diff_V"], local_dict=vars(coherent_tunneling))
 
     B = 1. / (16 * C ** 4) * diff_V * np.sqrt(16 * p0 ** 2 * C ** 4 - diff_V ** 2)
 
-    ((16 * p0 ** 2 * C ** 4 - diff_V ** 2).min())
-
-    #assert any(np.isnan(B)), "adjust p0 and C"
+    # print((16 * p0 ** 2 * C ** 4 - diff_V ** 2).min())
 
     def apply_A_plus(self):
         self.wavefunction *= self.A_plus
@@ -292,26 +292,33 @@ if __name__ =='__main__':
     #
     ##############################################################################################
 
-    plt.title("Coordinate probability density")
+    # plt.title("Coordinate probability densities")
     plt.semilogy(
         coherent_tunneling.X,
         spontaneous_emission_rho.diagonal(),
-        label="Spontaneous emission"
+        '-.',
+        lw=2,
+        label="spontaneous emission"
     )
     plt.semilogy(
         coherent_tunneling.X,
         stat_force_rho.diagonal(),
+        '--',
+        lw=2,
         label="environmentally assisted tunneling"
     )
     plt.semilogy(
         coherent_tunneling.X,
         np.abs(coherent_tunneling.wavefunction) ** 2,
-        label="Coherent tunneling"
+        '-',
+        lw=2,
+        label="coherent tunneling"
     )
-    plt.xlabel("$x$ (a.u.)")
-    plt.ylabel("Coordinate probability density")
-    plt.ylim((1e-7, 1.))
-    plt.legend()
+    plt.xlabel("$x$ (a.u.)", size=15)
+    plt.ylabel("Coordinate probability density, $\\langle x | \hat{\\rho} | x \\rangle$", size=15)
+    plt.ylim((1e-4, 1.))
+    plt.xlim((-15, 15))
+    # plt.legend()
     plt.show()
 
     ##############################################################################################
@@ -347,6 +354,7 @@ if __name__ =='__main__':
             tunnelling_probability.append(
                 np.sum(density[indx]) * propagator.dX
             )
+
         return densities, tunnelling_probability
 
     coherent_tunneling = SplitOpSchrodinger1D(**params)
@@ -359,6 +367,7 @@ if __name__ =='__main__':
     plt.subplot(121)
     plt.title("Coherenet evolution: Probability density")
     img_params = dict(
+        aspect=0.1,
         origin = 'lower',
         norm = LogNorm(1e-12, 1.),
         #cmap = 'jet',
